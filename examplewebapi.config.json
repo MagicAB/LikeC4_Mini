@@ -1,0 +1,70 @@
+{
+    "meta": {
+        "title": "Web+API Platform"
+    },
+    "container_hints": [
+        {
+            "match": "web",
+            "label": "Web App",
+            "tags": [
+                "C2",
+                "ui"
+            ]
+        },
+        {
+            "match": "api",
+            "label": "API",
+            "tags": [
+                "C2",
+                "svc"
+            ]
+        },
+        {
+            "match": "infra",
+            "label": "Infra",
+            "tags": [
+                "C2"
+            ]
+        }
+    ],
+    "externals": [
+        {
+            "id": "db",
+            "label": "External: PostgreSQL",
+            "tags": [
+                "C2",
+                "db"
+            ]
+        },
+        {
+            "id": "queue",
+            "label": "External: RabbitMQ",
+            "tags": [
+                "C2",
+                "mq"
+            ]
+        }
+    ],
+    "edge_rules": [
+        {
+            "pattern": "pg_query|SELECT|INSERT|UPDATE|DELETE",
+            "label": "SQL",
+            "target_id": "db"
+        },
+        {
+            "pattern": "publish|consume|basicPublish",
+            "label": "AMQP",
+            "target_id": "queue"
+        }
+    ],
+    "component_rules": [
+        {
+            "parent_id": "db",
+            "pattern": "\\b(orders|users|invoices)\\b",
+            "capture_group": 1,
+            "max": 99
+        }
+    ],
+    "link_rules": [],
+    "max_components": 8
+}
