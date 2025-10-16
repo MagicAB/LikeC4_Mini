@@ -186,8 +186,12 @@ def rules_apply(root: str, model: Model, dir_to_cid: Dict[str,str], cfg: dict):
             sizes.append((loc,fp))
         sizes.sort(reverse=True)
         for _, fp in sizes[:cfg["max_components"]]:
-            comp_id=norm_id(f"comp_{relpath(fp,root)}")
-            model.add_node(comp_id, relpath(fp,root), 'component', parent=cid)
+            rel = relpath(fp, root)
+            # show last folder + file for readability
+            parts = rel.split("/")
+            label = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+            comp_id=norm_id(f"comp_{rel}")
+            model.add_node(comp_id, label, 'component', parent=cid)
 
         for fp in files:
             ext=os.path.splitext(fp)[1].lower()
@@ -302,14 +306,19 @@ def mermaid_graph_from_model(model: Model,
         allowed.add(parent_filter)
         keep_nodes = keep_nodes & allowed
         keep_edges = [e for e in keep_edges if e.src in keep_nodes and e.dst in keep_nodes]
-    direction = (direction or 'TD').upper()
-    if direction not in ('TD','LR','BT','RL'):
-        direction = 'TD'
+    # Direction: components read better LR
+    use_dir = (direction or 'TD').upper()
+    if level == 'component':
+        use_dir = 'LR'
+    if use_dir not in ('TD','LR','BT','RL'):
+        use_dir = 'TD'
     collapsed = _collapse_edges(keep_edges, mode=edge_mode, min_count=edge_min)
 
+    init_line = "%%{init: {'flowchart': {'useMaxWidth': true, 'htmlLabels': true, 'diagramPadding': 8, 'nodeSpacing': 28, 'rankSpacing': 40}}}%%"
+
     lines = ["```mermaid",
-             f"graph {direction}",
-             "%%{init: {'flowchart': {'useMaxWidth': true, 'htmlLabels': true, 'diagramPadding': 8}} }%%"]
+             init_line,
+             f"flowchart {use_dir}",]
     emitted: Set[str] = set()
 
     def emit_node(n: Node):
@@ -329,10 +338,14 @@ def mermaid_graph_from_model(model: Model,
                 emit_node(ch)
 
     # top-level roots
-    roots = [x for x in model.children_of(None) if x.id in keep_nodes]
-    if not roots:
-        # try to find any system node
-        roots = [n for n in model.nodes.values() if n.type=='system' and n.id in keep_nodes]
+    if parent_filter and parent_filter in model.nodes:
+        # When filtering to a container, treat that container as the root
+        roots = [model.nodes[parent_filter]]
+    else:
+        roots = [x for x in model.children_of(None) if x.id in keep_nodes]
+        if not roots:
+            # try to find any system node
+            roots = [n for n in model.nodes.values() if n.type=='system' and n.id in keep_nodes]
     for root in roots:
         lines.append(f'  subgraph {root.id}_sg["{root.label}"]')
         emit_node(root)
@@ -353,8 +366,8 @@ def markdown_for_model(model: Model,
                        direction: str = 'TD',
                        edge_mode: str = 'per_label',
                        edge_min: int = 1,
-                       split_components: bool = False,
-                       component_chunk: int = 40) -> str:
+                       split_components: bool = True,
+                       component_chunk: int = 12) -> str:
     parts = [f"# {model.title} — Diagrams",
              "",
              "## System Context (C1)",
@@ -365,7 +378,7 @@ def markdown_for_model(model: Model,
     if include_components:
         parts += ["", "## Components (C3)"]
         if not split_components:
-            parts.append(mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min))
+            parts.append(mermaid_graph_from_model(model, 'component', include_tags, 'LR', edge_mode, edge_min))
         else:
             for node in model.nodes.values():
                 if node.type != 'container':
@@ -375,7 +388,7 @@ def markdown_for_model(model: Model,
                     continue
                 parts.append(f"### {node.label}")
                 # simple per-container filtered graph (Mermaid handles size better this way)
-                parts.append(mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min, parent_filter=node.id))
+                parts.append(mermaid_graph_from_model(model, 'component', include_tags, 'LR', edge_mode, edge_min, parent_filter=node.id))
     return "\n".join(parts)
 
 # ---------------- Python diagrams ----------------
@@ -584,7 +597,7 @@ def main(argv=None):
     sp_scan.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_scan.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
     sp_scan.add_argument("--edge-min", type=int, default=1)
-    sp_scan.add_argument("--split-components", action="store_true")
+    sp_scan.add_argument("--split-components", action="store_true", default=True)
     sp_scan.add_argument("--component-chunk", type=int, default=40)
 
     sp_render=sub.add_parser("render", help="Render a single JSON model to Markdown")
@@ -594,7 +607,7 @@ def main(argv=None):
     sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_render.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
     sp_render.add_argument("--edge-min", type=int, default=1)
-    sp_render.add_argument("--split-components", action="store_true")
+    sp_render.add_argument("--split-components", action="store_true", default=True)
     sp_render.add_argument("--component-chunk", type=int, default=40)
 
     sp_flow=sub.add_parser("flow", help="Call/class graphs; optional Python function flowchart")
@@ -616,7 +629,7 @@ def main(argv=None):
     sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_view.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
     sp_view.add_argument("--edge-min", type=int, default=1)
-    sp_view.add_argument("--split-components", action="store_true")
+    sp_view.add_argument("--split-components", action="store_true", default=True)
     sp_view.add_argument("--component-chunk", type=int, default=40)
     sp_view.add_argument("--out", default="view.md")
 
