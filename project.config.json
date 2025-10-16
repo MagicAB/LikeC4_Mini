@@ -1,0 +1,84 @@
+{
+  "meta": {
+    "title": "Example Project"
+  },
+  "exclude_dirs": [
+    ".git",
+    ".vscode",
+    "__pycache__"
+  ],
+  "ignore_hint_matches": [
+    "docs",
+    "documentation"
+  ],
+  "container_hints": [
+    {
+      "match": "scripts",
+      "label": "Scripts",
+      "tags": [
+        "C2"
+      ]
+    },
+    {
+      "match": "modules",
+      "label": "Modules",
+      "tags": [
+        "C2"
+      ]
+    },
+    {
+      "match": "sql",
+      "label": "Database",
+      "tags": [
+        "C2",
+        "db"
+      ]
+    }
+  ],
+  "externals": [
+    {
+      "id": "sql",
+      "label": "External: Database",
+      "tags": [
+        "C2",
+        "db"
+      ]
+    }
+  ],
+  "edge_rules": [
+    {
+      "pattern": "\\bInvoke-Sqlcmd\\b",
+      "label": "T-SQL",
+      "target_id": "sql",
+      "tags": [
+        "db"
+      ],
+      "file_exts": [
+        ".ps1",
+        ".psm1"
+      ]
+    }
+  ],
+  "component_rules": [
+    {
+      "parent_id": "sql",
+      "pattern": "\\b(tbl[A-Za-z0-9_]+)\\b",
+      "capture_group": 1,
+      "max": 25,
+      "tags": [
+        "db"
+      ]
+    }
+  ],
+  "link_rules": [
+    {
+      "type": "dot_source",
+      "label": "dot-source"
+    },
+    {
+      "type": "import_module",
+      "label": "Import-Module"
+    }
+  ],
+  "max_components": 12
+}

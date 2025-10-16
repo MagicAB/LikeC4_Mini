@@ -1,81 +1,42 @@
 #!/usr/bin/env python3
 """
-LikeC4 Mini (Rules-based Scanner + Viewer + Exporter) — standard-library only.
-
-- Scanner
-  * Auto C4-ish (no config) OR Rule-driven (via --config <json>)
-  * Python class/call graphs, PowerShell in-file call graphs
-- Viewer/Composer
-  * Merge many small JSON "fragments" into a model; tag filtering
-- Exporter
-  * Markdown (with ```mermaid blocks) → single-file HTML (shareable)
-
-Examples:
-  # Rule-driven scan (generic for any project)
-  python likec4mini.py scan . --config aspmt.config.json --include-components --out aspmt.md
-  # Auto scan (no config)
-  python likec4mini.py scan . --include-components --out diagrams.md
-
-  # Fragments → view
-  python likec4mini.py view fragments/*.json --tags C2,db --out c2.md
-  python likec4mini.py export-html c2.md --out c2.html --mermaid cdn
-
-  # Flow
-  python likec4mini.py flow Scripts/ProcessBlock.ps1 --out ps_flow.md
-  python likec4mini.py flow src/module.py --func handle_request --out py_flow.md
-
-How to Run:
-  # Scan using the config rules
-  python likec4mini.py scan . --config aspmt.config.json --include-components --out aspmt.md
-
-  # Preview as markdown (VS Code), or export a shareable HTML:
-  python likec4mini.py export-html aspmt.md --out aspmt.html
-  # If you can't use a CDN, download mermaid.min.js once and do:
-  python likec4mini.py export-html aspmt.md --out aspmt.html --mermaid assets/mermaid.min.js
-
-  Fragments (hand-authored small pieces):
-  python likec4mini.py view fragments/*.json --tags C2,db,aspmt --out platform.md
-  python likec4mini.py export-html platform.md --out platform.html
-
-Notes:
-  * Keep IDs stable in fragments/config (sql, pnp, spmt, pre, mig, etc.) so views compose cleanly.
-  * Use tags in nodes/edges and filter with --tags to create tailored views (e.g., only C2, or only db).
-  * The rules engine is intentionally simple: regex → edge to target, regex capture → components under parent. No dependencies, easy to audit for approvals.
-  * For PowerShell cross-file behavior, the rules already create edges for dot-source and Import-Module when enabled in link_rules.
-
+LikeC4 Mini — Rules-based Scanner + Viewer + Exporter (stdlib only)
+- Scan codebases and produce C4-ish diagrams (C1/C2/C3) as Mermaid in Markdown
+- Config-driven rules (containers, externals, edges, components, links)
+- PowerShell + Python call graphs
+- Export Markdown → single-file HTML (with Mermaid)
+- Edge collapsing (combine parallel edges with counts)
+- Respect exclude dirs (config + --exclude)
+- Split component (C3) view per container, with optional chunking
 """
 import argparse, ast, json, os, re, glob, html
 from typing import Dict, List, Tuple, Set, Optional
 from collections import defaultdict
 
-# ------------------------------
-# Defaults
-# ------------------------------
-EXCLUDE_DIRS_DEFAULT = {'.git','.hg','.svn','node_modules','.venv','venv','__pycache__','dist','build','out','bin','obj'}
+# ---------------- Defaults ----------------
+EXCLUDE_DIRS_DEFAULT = {'.git','.hg','.svn','node_modules','.venv','venv','__pycache__','dist','build','out','bin','obj','.vscode'}
 CODE_EXTENSIONS = {'.py','.js','.ts','.tsx','.cs','.java','.ps1','.psm1','.psd1','.sql'}
 
-# ------------------------------
-# Utilities
-# ------------------------------
+# ---------------- Utils ----------------
 def norm_id(s: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_]', '_', s)
 
 def relpath(path: str, root: str) -> str:
     try:
-        return os.path.relpath(path, root).replace('\\', '/')
+        return os.path.relpath(path, root).replace('\\','/')
     except Exception:
-        return path.replace('\\', '/')
+        return path.replace('\\','/')
 
 def read_text(path: str) -> str:
     try:
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(path,'r',encoding='utf-8',errors='ignore') as f:
             return f.read()
     except Exception:
         return ""
 
 def write_text(path: str, data: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
+    with open(path,'w',encoding='utf-8') as f:
         f.write(data)
 
 def list_code_files(root: str, exclude_dirs: Set[str]) -> List[str]:
@@ -95,11 +56,7 @@ def top_level_dirs(root: str, exclude: Set[str]) -> List[str]:
             out.append(p)
     return out
 
-
-
-# ------------------------------
-# Model
-# ------------------------------
+# ---------------- Model ----------------
 class Node:
     def __init__(self, id: str, label: str, type_: str, parent: Optional[str]=None, tags: Optional[Set[str]]=None):
         self.id=id; self.label=label; self.type=type_; self.parent=parent; self.tags=set(tags or [])
@@ -130,9 +87,7 @@ class Model:
     def children_of(self, parent_id: Optional[str]) -> List[Node]:
         return [n for n in self.nodes.values() if n.parent==parent_id]
 
-# ------------------------------
-# Auto-scan (no config)
-# ------------------------------
+# ---------------- Auto-scan (no config) ----------------
 def build_auto_model(root: str, title: Optional[str], exclude_dirs: Set[str], max_components_per_container: int=10) -> Model:
     title = title or os.path.basename(os.path.abspath(root))
     model = Model(title)
@@ -159,84 +114,71 @@ def build_auto_model(root: str, title: Optional[str], exclude_dirs: Set[str], ma
             comp_id=norm_id(f"comp_{relpath(fp,root)}")
             model.add_node(comp_id, relpath(fp,root), 'component', parent=cid)
 
-    # naive cross-container imports (py/js/ts)
+    # naive import edges (py/js/ts)
     name_to_cid = {os.path.basename(path): cid for cid,path,_ in containers}
     for cid, _, code_files in containers:
         for fp in code_files:
             text=read_text(fp)
-            # python
             for m in re.finditer(r'^(?:from|import)\s+([a-zA-Z0-9_\.]+)', text, flags=re.MULTILINE):
                 target=m.group(1).split('.')[0]
                 if target in name_to_cid and name_to_cid[target]!=cid:
                     model.add_edge(cid, name_to_cid[target], "import")
-            # js/ts
             for m in re.finditer(r'import\s+.*?from\s+[\'"](.+?)[\'"]', text):
                 target=m.group(1).split('/')[0]
                 if target in name_to_cid and name_to_cid[target]!=cid:
                     model.add_edge(cid, name_to_cid[target], "import")
     return model
 
-# ------------------------------
-# Rules config loader (generic)
-# ------------------------------
+# ---------------- Rules config ----------------
 def load_rules_config(path: str) -> dict:
-    raw = json.loads(read_text(path) or "{}")
-    # normalize expected keys
-    cfg = {
+    raw=json.loads(read_text(path) or "{}")
+    cfg={
         "meta": raw.get("meta", {}),
         "exclude_dirs": set(raw.get("exclude_dirs", [])),
         "ignore_hint_matches": set(raw.get("ignore_hint_matches", ["docs","documentation"])),
-        "container_hints": raw.get("container_hints", []),  # list of {match,label,tags?}
-        "externals": raw.get("externals", []),              # list of {id,label,tags?}
-        "edge_rules": raw.get("edge_rules", []),            # list of {pattern,label,target_id,tags?,file_exts?}
-        "component_rules": raw.get("component_rules", []),  # list of {parent_id,pattern,capture_group,max?,type?,tags?}
-        "link_rules": raw.get("link_rules", []),            # [{type:"dot_source"/"import_module", label:"..."}]
+        "container_hints": raw.get("container_hints", []),
+        "externals": raw.get("externals", []),
+        "edge_rules": raw.get("edge_rules", []),
+        "component_rules": raw.get("component_rules", []),
+        "link_rules": raw.get("link_rules", []),
         "max_components": int(raw.get("max_components", 10))
     }
-    # pre-compile regex for speed
     for r in cfg["edge_rules"]:
-        r["_re"] = re.compile(r["pattern"], re.IGNORECASE|re.MULTILINE)
-        r["_exts"] = set(x.lower() for x in r.get("file_exts", []))
+        r["_re"]=re.compile(r["pattern"], re.IGNORECASE|re.MULTILINE)
+        r["_exts"]=set(x.lower() for x in r.get("file_exts", []))
     for r in cfg["component_rules"]:
-        r["_re"] = re.compile(r["pattern"])
-        r["_max"] = int(r.get("max", 25))
-        r["_cg"]  = int(r.get("capture_group", 1))
+        r["_re"]=re.compile(r["pattern"])
+        r["_max"]=int(r.get("max", 25))
+        r["_cg"]=int(r.get("capture_group", 1))
     return cfg
 
-def rules_infer_containers(root: str, system_id: str, model: Model, cfg: dict) -> Dict[str,str]:
-    """Map top-level dir -> container_id based on container_hints; also add externals."""
+def rules_infer_containers(root: str, system_id: str, model: Model, cfg: dict, extra_exclude: Set[str]) -> Dict[str,str]:
     result={}
-    for d in top_level_dirs(root, set()):
-        base = os.path.basename(d)
-        low  = base.lower()
-        if any(x in low for x in cfg["ignore_hint_matches"]):  # skip docs, etc.
+    combined_exclude = EXCLUDE_DIRS_DEFAULT.union(set(cfg.get("exclude_dirs", []))).union(extra_exclude)
+    for d in top_level_dirs(root, combined_exclude):
+        base=os.path.basename(d); low=base.lower()
+        if any(x in low for x in cfg.get("ignore_hint_matches", ["docs","documentation"])):
             continue
-        label = None
-        tags  = set()
-        for hint in cfg["container_hints"]:
+        label=None; tags=set()
+        for hint in cfg.get("container_hints", []):
             if hint.get("match","").lower() in low:
-                label = hint.get("label", base)
-                tags  = set(hint.get("tags", []))
-                break
-        if label is None:
-            label = base
-        cid = norm_id(f"container_{label}")
+                label=hint.get("label", base); tags=set(hint.get("tags", [])); break
+        if label is None: label=base
+        cid=norm_id(f"container_{label}")
         model.add_node(cid, label, 'container', parent=system_id, tags=tags)
         result[d]=cid
     # externals as containers
-    for ext in cfg["externals"]:
-        cid = norm_id(f"container_{ext['id']}")
+    for ext in cfg.get("externals", []):
+        cid=norm_id(f"container_{ext['id']}")
         model.add_node(cid, ext["label"], 'container', parent=system_id, tags=set(ext.get("tags",[])))
     return result
 
 def rules_apply(root: str, model: Model, dir_to_cid: Dict[str,str], cfg: dict):
-    """Apply edge_rules, component_rules, and link_rules (dot-source/import-module)."""
-    # Helper: map logical target_id -> container node id
     def target_cid(target_id: str) -> str:
         return norm_id(f"container_{target_id}")
-    # Per-container: add components (top-N by size)
+    combined_exclude = EXCLUDE_DIRS_DEFAULT.union(set(cfg.get("exclude_dirs", [])))
     for dirpath, cid in dir_to_cid.items():
-        files = list_code_files(dirpath, EXCLUDE_DIRS_DEFAULT.union(cfg["exclude_dirs"]))
+        files = list_code_files(dirpath, combined_exclude)
         sizes=[]
         for fp in files:
             try: loc=sum(1 for _ in open(fp,'r',encoding='utf-8',errors='ignore'))
@@ -247,44 +189,38 @@ def rules_apply(root: str, model: Model, dir_to_cid: Dict[str,str], cfg: dict):
             comp_id=norm_id(f"comp_{relpath(fp,root)}")
             model.add_node(comp_id, relpath(fp,root), 'component', parent=cid)
 
-        # Scan files with rules
         for fp in files:
-            ext = os.path.splitext(fp)[1].lower()
+            ext=os.path.splitext(fp)[1].lower()
             text=read_text(fp)
             if not text: continue
 
-            # edge_rules: regex presence => edge to target_id
-            seen_targets = set()
+            # prevent repeated edges per file
+            seen_targets=set()
+
             for rule in cfg["edge_rules"]:
                 if rule["_exts"] and ext not in rule["_exts"]:
                     continue
                 if rule["_re"].search(text):
-                    key = (cid, rule["target_id"], rule.get("label",""))
+                    key=(cid, rule["target_id"], rule.get("label",""))
                     if key in seen_targets: 
                         continue
                     seen_targets.add(key)
                     model.add_edge(cid, target_cid(rule["target_id"]), rule.get("label",""), tags=set(rule.get("tags",[])))
 
-
-            # component_rules: surface named things (e.g., DB tables)
             for cr in cfg["component_rules"]:
-                matches = set(m.group(cr["_cg"]) for m in cr["_re"].finditer(text) if m.group(cr["_cg"]))
-                for i, name in enumerate(sorted(matches)):
+                matches=set(m.group(cr["_cg"]) for m in cr["_re"].finditer(text) if m.group(cr["_cg"]))
+                for i,name in enumerate(sorted(matches)):
                     if i>=cr["_max"]: break
-                    nid = norm_id(f"comp_{cr['parent_id']}_{name}")
-                    model.add_node(nid, name, cr.get("type","component"),
-                                   parent=target_cid(cr["parent_id"]),
-                                   tags=set(cr.get("tags",[])))
+                    nid=norm_id(f"comp_{cr['parent_id']}_{name}")
+                    model.add_node(nid, name, cr.get("type","component"), parent=target_cid(cr["parent_id"]), tags=set(cr.get("tags",[])))
 
-            # link_rules
-            for lr in cfg["link_rules"]:
+            for lr in cfg.get("link_rules", []):
                 if lr.get("type")=="dot_source":
                     for m in re.finditer(r'^\s*\.\s+["\']?(\.\\[^"\r\n]+)["\']?', text, flags=re.MULTILINE):
-                        seg = m.group(1).lstrip('.\\/').split('\\')[0].split('/')[0]
+                        seg=m.group(1).lstrip('.\\/').split('\\')[0].split('/')[0]
                         tgt=None
                         for d2,c2 in dir_to_cid.items():
-                            if os.path.basename(d2).lower()==seg.lower():
-                                tgt=c2; break
+                            if os.path.basename(d2).lower()==seg.lower(): tgt=c2; break
                         if tgt and tgt!=cid:
                             model.add_edge(cid, tgt, lr.get("label","dot-source"))
                 elif lr.get("type")=="import_module":
@@ -294,14 +230,11 @@ def rules_apply(root: str, model: Model, dir_to_cid: Dict[str,str], cfg: dict):
                             seg=mod.strip('./\\').split('\\')[0].split('/')[0]
                             tgt=None
                             for d2,c2 in dir_to_cid.items():
-                                if os.path.basename(d2).lower()==seg.lower():
-                                    tgt=c2; break
+                                if os.path.basename(d2).lower()==seg.lower(): tgt=c2; break
                             if tgt and tgt!=cid:
                                 model.add_edge(cid, tgt, lr.get("label","Import-Module"))
 
-# ------------------------------
-# Mermaid renderers (with tag filtering)
-# ------------------------------
+# ---------------- Visibility & collapse ----------------
 def _visible(model: Model, level: str, include_tags: Optional[Set[str]]) -> Tuple[Set[str], List[Edge]]:
     def ok_node(n: Node) -> bool:
         if level=='context' and n.type!='system': return False
@@ -321,16 +254,8 @@ def _visible(model: Model, level: str, include_tags: Optional[Set[str]]) -> Tupl
     return keep_nodes, keep_edges
 
 def _collapse_edges(edges, mode: str = "per_label", min_count: int = 1):
-    """
-    mode:
-      - "per_label": one edge per (src,dst,label) with counts (default)
-      - "pair":      one edge per (src,dst) regardless of label(s)
-      - "all":       no collapsing (original behavior)
-    min_count: suppress edges with total count below this threshold (after collapsing)
-    """
     if mode == "all":
-        return edges  # no change
-
+        return edges
     if mode == "pair":
         counts = defaultdict(int)
         for e in edges:
@@ -341,8 +266,7 @@ def _collapse_edges(edges, mode: str = "per_label", min_count: int = 1):
                 lbl = f"×{c}" if c > 1 else ""
                 out.append(Edge(src, dst, lbl))
         return out
-
-    # per_label (default)
+    # per_label
     by_pair_label = defaultdict(int)
     for e in edges:
         key = (e.src, e.dst, e.label or "")
@@ -354,18 +278,33 @@ def _collapse_edges(edges, mode: str = "per_label", min_count: int = 1):
             out.append(Edge(src, dst, label))
     return out
 
+# subtree helper
+def subtree_ids(model: Model, parent_id: str) -> Set[str]:
+    keep=set()
+    def walk(pid):
+        for n in model.children_of(pid):
+            keep.add(n.id)
+            walk(n.id)
+    walk(parent_id)
+    return keep
+
+# ---------------- Mermaid renderers ----------------
 def mermaid_graph_from_model(model: Model,
                              level: str = 'container',
                              include_tags: Optional[Set[str]] = None,
                              direction: str = 'TD',
                              edge_mode: str = 'per_label',
-                             edge_min: int = 1) -> str:
+                             edge_min: int = 1,
+                             parent_filter: Optional[str] = None) -> str:
     keep_nodes, keep_edges = _visible(model, level, include_tags)
+    if parent_filter:
+        allowed = subtree_ids(model, parent_filter)
+        allowed.add(parent_filter)
+        keep_nodes = keep_nodes & allowed
+        keep_edges = [e for e in keep_edges if e.src in keep_nodes and e.dst in keep_nodes]
     direction = (direction or 'TD').upper()
-    if direction not in ('TD', 'LR', 'BT', 'RL'):
+    if direction not in ('TD','LR','BT','RL'):
         direction = 'TD'
-
-    # collapse parallel edges here
     collapsed = _collapse_edges(keep_edges, mode=edge_mode, min_count=edge_min)
 
     lines = ["```mermaid",
@@ -390,30 +329,32 @@ def mermaid_graph_from_model(model: Model,
                 emit_node(ch)
 
     # top-level roots
-    for root in [x for x in model.children_of(None) if x.id in keep_nodes]:
+    roots = [x for x in model.children_of(None) if x.id in keep_nodes]
+    if not roots:
+        # try to find any system node
+        roots = [n for n in model.nodes.values() if n.type=='system' and n.id in keep_nodes]
+    for root in roots:
         lines.append(f'  subgraph {root.id}_sg["{root.label}"]')
         emit_node(root)
         nest(root.id, 2)
         lines.append('  end')
 
-    # edges (collapsed)
     for e in collapsed:
         if e.label:
             lines.append(f'  {e.src} -->|{e.label}| {e.dst}')
         else:
             lines.append(f'  {e.src} --> {e.dst}')
-
     lines.append("```")
     return "\n".join(lines)
-
-
 
 def markdown_for_model(model: Model,
                        include_components: bool = False,
                        include_tags: Optional[Set[str]] = None,
                        direction: str = 'TD',
                        edge_mode: str = 'per_label',
-                       edge_min: int = 1) -> str:
+                       edge_min: int = 1,
+                       split_components: bool = False,
+                       component_chunk: int = 40) -> str:
     parts = [f"# {model.title} — Diagrams",
              "",
              "## System Context (C1)",
@@ -422,14 +363,22 @@ def markdown_for_model(model: Model,
              "## Containers (C2)",
              mermaid_graph_from_model(model, 'container', include_tags, direction, edge_mode, edge_min)]
     if include_components:
-        parts += ["", "## Components (C3)",
-                  mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min)]
+        parts += ["", "## Components (C3)"]
+        if not split_components:
+            parts.append(mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min))
+        else:
+            for node in model.nodes.values():
+                if node.type != 'container':
+                    continue
+                comps = [n for n in model.nodes.values() if n.type=='component' and n.id in subtree_ids(model, node.id)]
+                if not comps:
+                    continue
+                parts.append(f"### {node.label}")
+                # simple per-container filtered graph (Mermaid handles size better this way)
+                parts.append(mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min, parent_filter=node.id))
     return "\n".join(parts)
 
-
-# ------------------------------
-# Python diagrams
-# ------------------------------
+# ---------------- Python diagrams ----------------
 def mermaid_class_diagram_from_python(file_path: str) -> str:
     src=read_text(file_path)
     if not src: return ""
@@ -491,11 +440,8 @@ def mermaid_call_graph_from_python(file_path: str) -> str:
     lines.append("```")
     return "\n".join(lines)
 
-# ------------------------------
-# PowerShell in-file call graph
-# ------------------------------
+# ---------------- PowerShell call graph ----------------
 FUNC_DEF = re.compile(r'^\s*function\s+([A-Za-z_][\w\-]*)\s*\{', re.IGNORECASE|re.MULTILINE)
-
 def _brace_match(text: str, start_idx: int) -> int:
     depth=0
     for i,c in enumerate(text[start_idx:], start=start_idx):
@@ -505,7 +451,7 @@ def _brace_match(text: str, start_idx: int) -> int:
             if depth==0: return i
     return -1
 
-def parse_ps_functions_and_calls(text: str) -> Tuple[Set[str], List[Tuple[str,str]], Set[str]]:
+def parse_ps_functions_and_calls(text: str):
     defs=set(m.group(1) for m in FUNC_DEF.finditer(text))
     bodies={}
     for m in FUNC_DEF.finditer(text):
@@ -537,16 +483,13 @@ def mermaid_call_graph_from_powershell(file_path: str) -> str:
     lines.append("```")
     return "\n".join(lines)
 
-# ------------------------------
-# JSON IO + fragments + merge
-# ------------------------------
+# ---------------- JSON IO & merge ----------------
 def read_json_model(path: str) -> Model:
     data=json.loads(read_text(path) or "{}")
     title=data.get("meta",{}).get("title") or os.path.splitext(os.path.basename(path))[0]
     model=Model(title)
     for n in data.get("nodes",[]):
-        model.add_node(n["id"], n.get("label",n["id"]), n.get("type","component"),
-                       n.get("parent"), set(n.get("tags",[])))
+        model.add_node(n["id"], n.get("label",n["id"]), n.get("type","component"), n.get("parent"), set(n.get("tags",[])))
     for e in data.get("edges",[]):
         model.add_edge(e["from"], e["to"], e.get("label",""), set(e.get("tags",[])))
     return model
@@ -568,9 +511,7 @@ def merge_models(models: List[Model], title: str="Composed View") -> Model:
             out.add_edge(e.src, e.dst, e.label, e.tags)
     return out
 
-# ------------------------------
-# Markdown → single-file HTML exporter
-# ------------------------------
+# ---------------- HTML export ----------------
 HTML_TEMPLATE = """<!doctype html>
 <html>
 <head>
@@ -590,60 +531,47 @@ pre.code{{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}}
 </body></html>"""
 
 def build_mermaid_loader(mermaid_source: str) -> str:
-    if mermaid_source.lower()=="cdn":
+    if (mermaid_source or "cdn").lower()=="cdn":
         src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"
         return f'<script src="{html.escape(src)}"></script>'
     else:
         return f'<script src="{html.escape(mermaid_source)}"></script>'
 
 def export_html_from_markdown(md_path: str, out_path: str, mermaid_source: str="cdn"):
-    md = read_text(md_path)
-
-    # Tokenize: keep order of headings and mermaid blocks
+    md=read_text(md_path)
+    title=os.path.splitext(os.path.basename(md_path))[0]
+    # Preserve order of headings and diagrams
     token_re = re.compile(r"(^#{1,6}\s+.*?$)|(```mermaid\s+[\s\S]*?```)", re.MULTILINE)
-    pos = 0
-    html_chunks = []
-    title = os.path.splitext(os.path.basename(md_path))[0]
-
+    pos=0; html_chunks=[]
     def h_to_html(line: str) -> str:
-        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        m=re.match(r"^(#{1,6})\s+(.*)$", line)
         if not m: return ""
-        level = len(m.group(1)); text = m.group(2).strip()
-        return f"<h{level}>{html.escape(text)}</h{level}>"
-
+        lvl=len(m.group(1)); text=m.group(2).strip()
+        return f"<h{lvl}>{html.escape(text)}</h{lvl}>"
     for m in token_re.finditer(md):
-        # any plain text before this token
-        if m.start() > pos:
-            chunk = md[pos:m.start()].strip()
+        if m.start()>pos:
+            chunk=md[pos:m.start()].strip()
             if chunk:
                 html_chunks.append(f'<pre class="code">{html.escape(chunk)}</pre>')
-        token = m.group(0)
+        token=m.group(0)
         if token.startswith("#"):
             html_chunks.append(h_to_html(token.strip()))
         else:
-            # mermaid block
-            inner = re.sub(r"^```mermaid\s+|\s*```$", "", token, flags=re.MULTILINE).strip()
+            inner=re.sub(r"^```mermaid\s+|\s*```$","",token,flags=re.MULTILINE).strip()
             html_chunks.append(f'<div class="mblock"><div class="mermaid">{html.escape(inner)}</div></div>')
-        pos = m.end()
-
-    # tail text
-    if pos < len(md):
-        tail = md[pos:].strip()
+        pos=m.end()
+    if pos<len(md):
+        tail=md[pos:].strip()
         if tail:
             html_chunks.append(f'<pre class="code">{html.escape(tail)}</pre>')
-
-    html_out = HTML_TEMPLATE.format(
-        title = html.escape(title),
-        mermaid_loader = build_mermaid_loader(mermaid_source),
-        body = "\n".join(html_chunks)
-    )
+    html_out=HTML_TEMPLATE.format(title=html.escape(title),
+                                  mermaid_loader=build_mermaid_loader(mermaid_source),
+                                  body="\n".join(html_chunks))
     write_text(out_path, html_out)
 
-# ------------------------------
-# CLI
-# ------------------------------
+# ---------------- CLI ----------------
 def main(argv=None):
-    p=argparse.ArgumentParser(description="LikeC4 Mini: Rules-based Scanner + Viewer + Exporter")
+    p=argparse.ArgumentParser(description="LikeC4 Mini — Scanner + Viewer + Exporter")
     sub=p.add_subparsers(dest="cmd", required=True)
 
     sp_scan=sub.add_parser("scan", help="Scan & render diagrams")
@@ -651,19 +579,23 @@ def main(argv=None):
     sp_scan.add_argument("--exclude", default="")
     sp_scan.add_argument("--max-components", type=int, default=10)
     sp_scan.add_argument("--include-components", action="store_true")
-    sp_scan.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
-    sp_scan.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
-    sp_scan.add_argument("--edge-min", type=int, default=1)
     sp_scan.add_argument("--config", help="Rules JSON for containers/edges/components")
     sp_scan.add_argument("--out", default="diagrams.md")
+    sp_scan.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_scan.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
+    sp_scan.add_argument("--edge-min", type=int, default=1)
+    sp_scan.add_argument("--split-components", action="store_true")
+    sp_scan.add_argument("--component-chunk", type=int, default=40)
 
     sp_render=sub.add_parser("render", help="Render a single JSON model to Markdown")
     sp_render.add_argument("model"); sp_render.add_argument("--out", default="model.md")
     sp_render.add_argument("--include-components", action="store_true")
-    sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD") 
-    sp_render.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
-    sp_render.add_argument("--edge-min", type=int, default=1)
     sp_render.add_argument("--tags", default="")
+    sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_render.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
+    sp_render.add_argument("--edge-min", type=int, default=1)
+    sp_render.add_argument("--split-components", action="store_true")
+    sp_render.add_argument("--component-chunk", type=int, default=40)
 
     sp_flow=sub.add_parser("flow", help="Call/class graphs; optional Python function flowchart")
     sp_flow.add_argument("file"); sp_flow.add_argument("--func")
@@ -680,10 +612,12 @@ def main(argv=None):
     sp_view.add_argument("inputs", nargs="+")
     sp_view.add_argument("--title", default="Composed View")
     sp_view.add_argument("--include-components", action="store_true")
-    sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD") 
-    sp_view.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
-    sp_view.add_argument("--edge-min", type=int, default=1)
     sp_view.add_argument("--tags", default="")
+    sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_view.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label")
+    sp_view.add_argument("--edge-min", type=int, default=1)
+    sp_view.add_argument("--split-components", action="store_true")
+    sp_view.add_argument("--component-chunk", type=int, default=40)
     sp_view.add_argument("--out", default="view.md")
 
     sp_html=sub.add_parser("export-html", help="Markdown (Mermaid) → single HTML")
@@ -696,39 +630,31 @@ def main(argv=None):
         exclude=set([x.strip() for x in args.exclude.split(',') if x.strip()])
         if args.config:
             cfg=load_rules_config(args.config)
-            title = args.title or cfg["meta"].get("title") or os.path.basename(os.path.abspath(args.root))
+            title=args.title or cfg["meta"].get("title") or os.path.basename(os.path.abspath(args.root))
             model=Model(title); system_id=norm_id(f"system_{title}")
             model.add_node(system_id, title, 'system', parent=None)
-            # containers via hints + externals
-            dmap = rules_infer_containers(args.root, system_id, model, cfg)
-            # apply rules
+            dmap=rules_infer_containers(args.root, system_id, model, cfg, exclude)
             rules_apply(args.root, model, dmap, cfg)
-            md=markdown_for_model(model, 
-                                  include_components=args.include_components,
-                                  include_tags=None,
-                                  direction=args.direction,
-                                  edge_mode=args.edge_mode,
-                                  edge_min=args.edge_min)
+            md=markdown_for_model(model, include_components=args.include_components,
+                                  include_tags=None, direction=args.direction,
+                                  edge_mode=args.edge_mode, edge_min=args.edge_min,
+                                  split_components=args.split_components, component_chunk=args.component_chunk)
             write_text(args.out, md); print(f"Wrote {args.out}")
         else:
             model = build_auto_model(args.root, args.title, exclude, args.max_components)
-            md=markdown_for_model(model, 
-                                  include_components=args.include_components,
-                                  include_tags=None,
-                                  direction=args.direction,
-                                  edge_mode=args.edge_mode,
-                                  edge_min=args.edge_min)
+            md=markdown_for_model(model, include_components=args.include_components,
+                                  include_tags=None, direction=args.direction,
+                                  edge_mode=args.edge_mode, edge_min=args.edge_min,
+                                  split_components=args.split_components, component_chunk=args.component_chunk)
             write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="render":
         model=read_json_model(args.model)
         tags=set([t.strip() for t in args.tags.split(',') if t.strip()]) or None
-        md=markdown_for_model(model, 
-                              include_components=args.include_components, 
-                              include_tags=tags,
-                              direction=args.direction,
-                              edge_mode=args.edge_mode,
-                              edge_min=args.edge_min)
+        md=markdown_for_model(model, include_components=args.include_components,
+                              include_tags=tags, direction=args.direction,
+                              edge_mode=args.edge_mode, edge_min=args.edge_min,
+                              split_components=args.split_components, component_chunk=args.component_chunk)
         write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="flow":
@@ -740,8 +666,8 @@ def main(argv=None):
                 if cg: parts+=["","## PowerShell Call Graph", cg]
         else:
             if args.func:
-                ff=mermaid_simple_flow_for_function(args.file, args.func)
-                if ff: parts+=["",f"## Function Flow — {args.func}()", ff]
+                # optional simple flow could be added here; keeping call/class for stdlib
+                pass
             if not args.skip_classes:
                 cd=mermaid_class_diagram_from_python(args.file)
                 if cd: parts+=["","## Classes", cd]
@@ -765,12 +691,10 @@ def main(argv=None):
         models=[read_json_model(p) for p in files]
         combined=merge_models(models, title=args.title)
         tags=set([t.strip() for t in args.tags.split(',') if t.strip()]) or None
-        md=markdown_for_model(combined, 
-                              include_components=args.include_components, 
-                              include_tags=tags,
-                              direction=args.direction,
-                              edge_mode=args.edge_mode,
-                              edge_min=args.edge_min)
+        md=markdown_for_model(combined, include_components=args.include_components,
+                              include_tags=tags, direction=args.direction,
+                              edge_mode=args.edge_mode, edge_min=args.edge_min,
+                              split_components=args.split_components, component_chunk=args.component_chunk)
         write_text(args.out, md); print(f"Composed {len(files)} files → {args.out}")
 
     elif args.cmd=="export-html":
