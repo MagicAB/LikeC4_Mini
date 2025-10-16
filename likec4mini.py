@@ -46,6 +46,7 @@ Notes:
 """
 import argparse, ast, json, os, re, glob, html
 from typing import Dict, List, Tuple, Set, Optional
+from collections import defaultdict
 
 # ------------------------------
 # Defaults
@@ -93,6 +94,8 @@ def top_level_dirs(root: str, exclude: Set[str]) -> List[str]:
         if os.path.isdir(p) and name not in exclude:
             out.append(p)
     return out
+
+
 
 # ------------------------------
 # Model
@@ -251,11 +254,17 @@ def rules_apply(root: str, model: Model, dir_to_cid: Dict[str,str], cfg: dict):
             if not text: continue
 
             # edge_rules: regex presence => edge to target_id
+            seen_targets = set()
             for rule in cfg["edge_rules"]:
                 if rule["_exts"] and ext not in rule["_exts"]:
                     continue
                 if rule["_re"].search(text):
+                    key = (cid, rule["target_id"], rule.get("label",""))
+                    if key in seen_targets: 
+                        continue
+                    seen_targets.add(key)
                     model.add_edge(cid, target_cid(rule["target_id"]), rule.get("label",""), tags=set(rule.get("tags",[])))
+
 
             # component_rules: surface named things (e.g., DB tables)
             for cr in cfg["component_rules"]:
@@ -311,13 +320,53 @@ def _visible(model: Model, level: str, include_tags: Optional[Set[str]]) -> Tupl
                 keep_edges.append(e)
     return keep_nodes, keep_edges
 
-def mermaid_graph_from_model(model: Model, level: str='container', 
-                             include_tags: Optional[Set[str]]=None,
-                             direction: str = 'TD') -> str:
+def _collapse_edges(edges, mode: str = "per_label", min_count: int = 1):
+    """
+    mode:
+      - "per_label": one edge per (src,dst,label) with counts (default)
+      - "pair":      one edge per (src,dst) regardless of label(s)
+      - "all":       no collapsing (original behavior)
+    min_count: suppress edges with total count below this threshold (after collapsing)
+    """
+    if mode == "all":
+        return edges  # no change
+
+    if mode == "pair":
+        counts = defaultdict(int)
+        for e in edges:
+            counts[(e.src, e.dst)] += 1
+        out = []
+        for (src, dst), c in counts.items():
+            if c >= min_count:
+                lbl = f"×{c}" if c > 1 else ""
+                out.append(Edge(src, dst, lbl))
+        return out
+
+    # per_label (default)
+    by_pair_label = defaultdict(int)
+    for e in edges:
+        key = (e.src, e.dst, e.label or "")
+        by_pair_label[key] += 1
+    out = []
+    for (src, dst, lab), c in by_pair_label.items():
+        if c >= min_count:
+            label = f"{lab} ×{c}" if lab and c > 1 else (f"×{c}" if c > 1 and not lab else lab)
+            out.append(Edge(src, dst, label))
+    return out
+
+def mermaid_graph_from_model(model: Model,
+                             level: str = 'container',
+                             include_tags: Optional[Set[str]] = None,
+                             direction: str = 'TD',
+                             edge_mode: str = 'per_label',
+                             edge_min: int = 1) -> str:
     keep_nodes, keep_edges = _visible(model, level, include_tags)
     direction = (direction or 'TD').upper()
-    if direction not in ('TD','LR','BT','RL'):
+    if direction not in ('TD', 'LR', 'BT', 'RL'):
         direction = 'TD'
+
+    # collapse parallel edges here
+    collapsed = _collapse_edges(keep_edges, mode=edge_mode, min_count=edge_min)
 
     lines = ["```mermaid",
              f"graph {direction}",
@@ -331,7 +380,6 @@ def mermaid_graph_from_model(model: Model, level: str='container',
         emitted.add(n.id)
 
     def nest(parent: Optional[str], indent: int = 1):
-        # render containers/systems as subgraphs; plain components as nodes
         for ch in [x for x in model.children_of(parent) if x.id in keep_nodes]:
             if ch.type in ('system', 'container'):
                 lines.append('  ' * indent + f'subgraph {ch.id}_sg["{ch.label}"]')
@@ -339,19 +387,17 @@ def mermaid_graph_from_model(model: Model, level: str='container',
                 nest(ch.id, indent + 1)
                 lines.append('  ' * indent + 'end')
             else:
-                #lines.append('  ' * indent + '%% component')
-                # components are leaf nodes
                 emit_node(ch)
 
-    # start from top-level roots (parent=None)
+    # top-level roots
     for root in [x for x in model.children_of(None) if x.id in keep_nodes]:
         lines.append(f'  subgraph {root.id}_sg["{root.label}"]')
         emit_node(root)
         nest(root.id, 2)
         lines.append('  end')
 
-    # edges last (between the single set of emitted nodes)
-    for e in keep_edges:
+    # edges (collapsed)
+    for e in collapsed:
         if e.label:
             lines.append(f'  {e.src} -->|{e.label}| {e.dst}')
         else:
@@ -361,18 +407,25 @@ def mermaid_graph_from_model(model: Model, level: str='container',
     return "\n".join(lines)
 
 
-def markdown_for_model(model: Model, include_components: bool=False, 
-                       include_tags: Optional[Set[str]]=None,
-                       direction: str = 'TD') -> str:
-    parts=[f"# {model.title} — Diagrams","",
-           "## System Context (C1)",
-           mermaid_graph_from_model(model,'context', include_tags, direction),
-           "",
-           "## Containers (C2)",
-           mermaid_graph_from_model(model,'container', include_tags, direction)]
+
+def markdown_for_model(model: Model,
+                       include_components: bool = False,
+                       include_tags: Optional[Set[str]] = None,
+                       direction: str = 'TD',
+                       edge_mode: str = 'per_label',
+                       edge_min: int = 1) -> str:
+    parts = [f"# {model.title} — Diagrams",
+             "",
+             "## System Context (C1)",
+             mermaid_graph_from_model(model, 'context', include_tags, direction, edge_mode, edge_min),
+             "",
+             "## Containers (C2)",
+             mermaid_graph_from_model(model, 'container', include_tags, direction, edge_mode, edge_min)]
     if include_components:
-        parts+=["","## Components (C3)", mermaid_graph_from_model(model,'component', include_tags, direction)]
+        parts += ["", "## Components (C3)",
+                  mermaid_graph_from_model(model, 'component', include_tags, direction, edge_mode, edge_min)]
     return "\n".join(parts)
+
 
 # ------------------------------
 # Python diagrams
@@ -599,13 +652,17 @@ def main(argv=None):
     sp_scan.add_argument("--max-components", type=int, default=10)
     sp_scan.add_argument("--include-components", action="store_true")
     sp_scan.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_scan.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
+    sp_scan.add_argument("--edge-min", type=int, default=1)
     sp_scan.add_argument("--config", help="Rules JSON for containers/edges/components")
     sp_scan.add_argument("--out", default="diagrams.md")
 
     sp_render=sub.add_parser("render", help="Render a single JSON model to Markdown")
     sp_render.add_argument("model"); sp_render.add_argument("--out", default="model.md")
     sp_render.add_argument("--include-components", action="store_true")
-    sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD") 
+    sp_render.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
+    sp_render.add_argument("--edge-min", type=int, default=1)
     sp_render.add_argument("--tags", default="")
 
     sp_flow=sub.add_parser("flow", help="Call/class graphs; optional Python function flowchart")
@@ -623,7 +680,9 @@ def main(argv=None):
     sp_view.add_argument("inputs", nargs="+")
     sp_view.add_argument("--title", default="Composed View")
     sp_view.add_argument("--include-components", action="store_true")
-    sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
+    sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD") 
+    sp_view.add_argument("--edge-mode", choices=["all","pair","per_label"], default="per_label") 
+    sp_view.add_argument("--edge-min", type=int, default=1)
     sp_view.add_argument("--tags", default="")
     sp_view.add_argument("--out", default="view.md")
 
@@ -647,14 +706,18 @@ def main(argv=None):
             md=markdown_for_model(model, 
                                   include_components=args.include_components,
                                   include_tags=None,
-                                  direction=args.direction)
+                                  direction=args.direction,
+                                  edge_mode=args.edge_mode,
+                                  edge_min=args.edge_min)
             write_text(args.out, md); print(f"Wrote {args.out}")
         else:
             model = build_auto_model(args.root, args.title, exclude, args.max_components)
             md=markdown_for_model(model, 
                                   include_components=args.include_components,
                                   include_tags=None,
-                                  direction=args.direction)
+                                  direction=args.direction,
+                                  edge_mode=args.edge_mode,
+                                  edge_min=args.edge_min)
             write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="render":
@@ -663,7 +726,9 @@ def main(argv=None):
         md=markdown_for_model(model, 
                               include_components=args.include_components, 
                               include_tags=tags,
-                              direction=args.direction)
+                              direction=args.direction,
+                              edge_mode=args.edge_mode,
+                              edge_min=args.edge_min)
         write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="flow":
@@ -703,7 +768,9 @@ def main(argv=None):
         md=markdown_for_model(combined, 
                               include_components=args.include_components, 
                               include_tags=tags,
-                              direction=args.direction)
+                              direction=args.direction,
+                              edge_mode=args.edge_mode,
+                              edge_min=args.edge_min)
         write_text(args.out, md); print(f"Composed {len(files)} files → {args.out}")
 
     elif args.cmd=="export-html":
