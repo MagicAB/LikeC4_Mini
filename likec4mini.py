@@ -534,22 +534,46 @@ def build_mermaid_loader(mermaid_source: str) -> str:
         return f'<script src="{html.escape(mermaid_source)}"></script>'
 
 def export_html_from_markdown(md_path: str, out_path: str, mermaid_source: str="cdn"):
-    md=read_text(md_path)
-    title=os.path.splitext(os.path.basename(md_path))[0]
-    blocks=re.findall(r"```mermaid\s+([\s\S]*?)```", md, re.MULTILINE)
-    headings=re.findall(r"^(#{1,3})\s+(.+)$", md, re.MULTILINE)
-    body=[]
-    if headings:
-        for h in headings:
-            level=len(h[0]); text=h[1].strip()
-            body.append(f"<h{level}>{html.escape(text)}</h{level}>")
-    for b in blocks:
-        body.append(f'<div class="mblock"><div class="mermaid">{html.escape(b)}</div></div>')
-    if not blocks:
-        body.append(f'<pre class="code">{html.escape(md)}</pre>')
-    html_out=HTML_TEMPLATE.format(title=html.escape(title),
-                                  mermaid_loader=build_mermaid_loader(mermaid_source),
-                                  body="\n".join(body))
+    md = read_text(md_path)
+
+    # Tokenize: keep order of headings and mermaid blocks
+    token_re = re.compile(r"(^#{1,6}\s+.*?$)|(```mermaid\s+[\s\S]*?```)", re.MULTILINE)
+    pos = 0
+    html_chunks = []
+    title = os.path.splitext(os.path.basename(md_path))[0]
+
+    def h_to_html(line: str) -> str:
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if not m: return ""
+        level = len(m.group(1)); text = m.group(2).strip()
+        return f"<h{level}>{html.escape(text)}</h{level}>"
+
+    for m in token_re.finditer(md):
+        # any plain text before this token
+        if m.start() > pos:
+            chunk = md[pos:m.start()].strip()
+            if chunk:
+                html_chunks.append(f'<pre class="code">{html.escape(chunk)}</pre>')
+        token = m.group(0)
+        if token.startswith("#"):
+            html_chunks.append(h_to_html(token.strip()))
+        else:
+            # mermaid block
+            inner = re.sub(r"^```mermaid\s+|\s*```$", "", token, flags=re.MULTILINE).strip()
+            html_chunks.append(f'<div class="mblock"><div class="mermaid">{html.escape(inner)}</div></div>')
+        pos = m.end()
+
+    # tail text
+    if pos < len(md):
+        tail = md[pos:].strip()
+        if tail:
+            html_chunks.append(f'<pre class="code">{html.escape(tail)}</pre>')
+
+    html_out = HTML_TEMPLATE.format(
+        title = html.escape(title),
+        mermaid_loader = build_mermaid_loader(mermaid_source),
+        body = "\n".join(html_chunks)
+    )
     write_text(out_path, html_out)
 
 # ------------------------------
