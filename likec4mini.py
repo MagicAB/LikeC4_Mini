@@ -311,10 +311,17 @@ def _visible(model: Model, level: str, include_tags: Optional[Set[str]]) -> Tupl
                 keep_edges.append(e)
     return keep_nodes, keep_edges
 
-def mermaid_graph_from_model(model: Model, level: str='container', include_tags: Optional[Set[str]]=None) -> str:
+def mermaid_graph_from_model(model: Model, level: str='container', 
+                             include_tags: Optional[Set[str]]=None,
+                             direction: str = 'TD') -> str:
     keep_nodes, keep_edges = _visible(model, level, include_tags)
+    direction = (direction or 'TD').upper()
+    if direction not in ('TD','LR','BT','RL'):
+        direction = 'TD'
 
-    lines = ["```mermaid", "graph LR"]
+    lines = ["```mermaid",
+             f"graph {direction}",
+             "%%{init: {'flowchart': {'useMaxWidth': true, 'htmlLabels': true, 'diagramPadding': 8}} }%%"]
     emitted: Set[str] = set()
 
     def emit_node(n: Node):
@@ -332,7 +339,8 @@ def mermaid_graph_from_model(model: Model, level: str='container', include_tags:
                 nest(ch.id, indent + 1)
                 lines.append('  ' * indent + 'end')
             else:
-                lines.append('  ' * indent + '%% component')
+                #lines.append('  ' * indent + '%% component')
+                # components are leaf nodes
                 emit_node(ch)
 
     # start from top-level roots (parent=None)
@@ -353,15 +361,17 @@ def mermaid_graph_from_model(model: Model, level: str='container', include_tags:
     return "\n".join(lines)
 
 
-def markdown_for_model(model: Model, include_components: bool=False, include_tags: Optional[Set[str]]=None) -> str:
+def markdown_for_model(model: Model, include_components: bool=False, 
+                       include_tags: Optional[Set[str]]=None,
+                       direction: str = 'TD') -> str:
     parts=[f"# {model.title} — Diagrams","",
            "## System Context (C1)",
-           mermaid_graph_from_model(model,'context', include_tags),
+           mermaid_graph_from_model(model,'context', include_tags, direction),
            "",
            "## Containers (C2)",
-           mermaid_graph_from_model(model,'container', include_tags)]
+           mermaid_graph_from_model(model,'container', include_tags, direction)]
     if include_components:
-        parts+=["","## Components (C3)", mermaid_graph_from_model(model,'component', include_tags)]
+        parts+=["","## Components (C3)", mermaid_graph_from_model(model,'component', include_tags, direction)]
     return "\n".join(parts)
 
 # ------------------------------
@@ -588,12 +598,14 @@ def main(argv=None):
     sp_scan.add_argument("--exclude", default="")
     sp_scan.add_argument("--max-components", type=int, default=10)
     sp_scan.add_argument("--include-components", action="store_true")
+    sp_scan.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_scan.add_argument("--config", help="Rules JSON for containers/edges/components")
     sp_scan.add_argument("--out", default="diagrams.md")
 
     sp_render=sub.add_parser("render", help="Render a single JSON model to Markdown")
     sp_render.add_argument("model"); sp_render.add_argument("--out", default="model.md")
     sp_render.add_argument("--include-components", action="store_true")
+    sp_render.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_render.add_argument("--tags", default="")
 
     sp_flow=sub.add_parser("flow", help="Call/class graphs; optional Python function flowchart")
@@ -611,6 +623,7 @@ def main(argv=None):
     sp_view.add_argument("inputs", nargs="+")
     sp_view.add_argument("--title", default="Composed View")
     sp_view.add_argument("--include-components", action="store_true")
+    sp_view.add_argument("--direction", choices=["TD","LR","BT","RL"], default="TD")
     sp_view.add_argument("--tags", default="")
     sp_view.add_argument("--out", default="view.md")
 
@@ -631,17 +644,26 @@ def main(argv=None):
             dmap = rules_infer_containers(args.root, system_id, model, cfg)
             # apply rules
             rules_apply(args.root, model, dmap, cfg)
-            md=markdown_for_model(model, include_components=args.include_components)
+            md=markdown_for_model(model, 
+                                  include_components=args.include_components,
+                                  include_tags=None,
+                                  direction=args.direction)
             write_text(args.out, md); print(f"Wrote {args.out}")
         else:
             model = build_auto_model(args.root, args.title, exclude, args.max_components)
-            md=markdown_for_model(model, include_components=args.include_components)
+            md=markdown_for_model(model, 
+                                  include_components=args.include_components,
+                                  include_tags=None,
+                                  direction=args.direction)
             write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="render":
         model=read_json_model(args.model)
         tags=set([t.strip() for t in args.tags.split(',') if t.strip()]) or None
-        md=markdown_for_model(model, include_components=args.include_components, include_tags=tags)
+        md=markdown_for_model(model, 
+                              include_components=args.include_components, 
+                              include_tags=tags,
+                              direction=args.direction)
         write_text(args.out, md); print(f"Wrote {args.out}")
 
     elif args.cmd=="flow":
@@ -678,7 +700,10 @@ def main(argv=None):
         models=[read_json_model(p) for p in files]
         combined=merge_models(models, title=args.title)
         tags=set([t.strip() for t in args.tags.split(',') if t.strip()]) or None
-        md=markdown_for_model(combined, include_components=args.include_components, include_tags=tags)
+        md=markdown_for_model(combined, 
+                              include_components=args.include_components, 
+                              include_tags=tags,
+                              direction=args.direction)
         write_text(args.out, md); print(f"Composed {len(files)} files → {args.out}")
 
     elif args.cmd=="export-html":
